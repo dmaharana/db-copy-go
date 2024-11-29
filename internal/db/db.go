@@ -7,7 +7,12 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	_ "modernc.org/sqlite"
 )
+
+func init() {
+	// Removed the SQLite driver registration
+}
 
 // DBType represents the type of database
 type DBType int
