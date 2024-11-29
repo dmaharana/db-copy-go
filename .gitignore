@@ -1,0 +1,14 @@
+build/*
+*.db
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+*.pyc
+*.pyo
+*.orig
+*.swp
+*.tmp
+*.bak
+*.tmp*
+*.swp*
