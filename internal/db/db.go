@@ -96,69 +96,60 @@ type Column struct {
 func (c *Copier) getSourceSchema() ([]Column, error) {
 	var columns []Column
 
+	// Get table schema using GORM's Migrator
+	columnTypes, err := c.sourceConn.Migrator().ColumnTypes(c.TableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get column types: %w", err)
+	}
+
+	// Get primary key information using raw SQL based on database type
+	var primaryKeys []string
 	switch c.sourceDBType {
 	case DBTypeSQLite:
-		// SQLite schema query
-		rows, err := c.sourceConn.Raw(fmt.Sprintf("PRAGMA table_info(%s)", c.TableName)).Rows()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get table schema: %w", err)
+		var pks []struct {
+			Name string
+			Pk   int
 		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var cid int
-			var name, type_ string
-			var notnull, pk int
-			var dflt_value interface{}
-			if err := rows.Scan(&cid, &name, &type_, &notnull, &dflt_value, &pk); err != nil {
-				return nil, err
-			}
-
-			columns = append(columns, Column{
-				Name:       name,
-				Type:       c.convertDataType(type_, c.sourceDBType, c.destDBType),
-				IsNullable: notnull == 0,
-				IsPrimary:  pk == 1,
-			})
+		if err := c.sourceConn.Raw("SELECT name, pk FROM pragma_table_info(?) WHERE pk > 0", c.TableName).Scan(&pks).Error; err != nil {
+			return nil, fmt.Errorf("failed to get primary keys: %w", err)
 		}
-
+		for _, pk := range pks {
+			primaryKeys = append(primaryKeys, pk.Name)
+		}
 	case DBTypePostgres:
-		// PostgreSQL schema query
-		query := `
-			SELECT column_name, data_type, 
-				   CASE WHEN is_nullable = 'YES' THEN true ELSE false END as is_nullable,
-				   CASE WHEN constraint_type = 'PRIMARY KEY' THEN true ELSE false END as is_primary
-			FROM information_schema.columns c
-			LEFT JOIN (
-				SELECT kcu.column_name, tc.constraint_type
-				FROM information_schema.table_constraints tc
-				JOIN information_schema.key_column_usage kcu
-					ON tc.constraint_name = kcu.constraint_name
-				WHERE tc.table_name = ? AND tc.constraint_type = 'PRIMARY KEY'
-			) pk ON c.column_name = pk.column_name
-			WHERE c.table_name = ?
-			ORDER BY ordinal_position;
-		`
-		rows, err := c.sourceConn.Raw(query, c.TableName, c.TableName).Rows()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get table schema: %w", err)
+		if err := c.sourceConn.Raw(`
+			SELECT a.attname
+			FROM pg_index i
+			JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+			WHERE i.indrelid = ?::regclass AND i.indisprimary
+		`, c.TableName).Scan(&primaryKeys).Error; err != nil {
+			return nil, fmt.Errorf("failed to get primary keys: %w", err)
 		}
-		defer rows.Close()
+	}
 
-		for rows.Next() {
-			var name, dataType string
-			var isNullable, isPrimary bool
-			if err := rows.Scan(&name, &dataType, &isNullable, &isPrimary); err != nil {
-				return nil, err
-			}
+	// Create a map of primary key columns for easier lookup
+	pkMap := make(map[string]bool)
+	for _, pk := range primaryKeys {
+		pkMap[pk] = true
+	}
 
-			columns = append(columns, Column{
-				Name:       name,
-				Type:       c.convertDataType(dataType, c.sourceDBType, c.destDBType),
-				IsNullable: isNullable,
-				IsPrimary:  isPrimary,
-			})
+	// Convert column information to our Column type
+	for _, col := range columnTypes {
+		nullable, ok := col.Nullable()
+		if !ok {
+			// If we can't determine nullability, assume it's nullable
+			nullable = true
 		}
+
+		// Get the database type name
+		dbTypeName := col.DatabaseTypeName()
+
+		columns = append(columns, Column{
+			Name:       col.Name(),
+			Type:       c.convertDataType(dbTypeName, c.sourceDBType, c.destDBType),
+			IsNullable: nullable,
+			IsPrimary:  pkMap[col.Name()],
+		})
 	}
 
 	return columns, nil
@@ -231,37 +222,25 @@ func (c *Copier) ensureTableExists() error {
 		return fmt.Errorf("failed to get source table schema: %w", err)
 	}
 
-	// Build CREATE TABLE statement based on destination database type
+	// Create table definition
 	var columnDefs []string
 	for _, col := range columns {
-		var def string
-		switch c.destDBType {
-		case DBTypePostgres:
-			def = fmt.Sprintf("%s %s", col.Name, col.Type)
-			if col.IsPrimary {
-				def += " PRIMARY KEY"
-			}
-			if !col.IsNullable {
-				def += " NOT NULL"
-			}
-		case DBTypeSQLite:
-			def = fmt.Sprintf("%s %s", col.Name, col.Type)
-			if col.IsPrimary {
-				def += " PRIMARY KEY"
-			}
-			if !col.IsNullable {
-				def += " NOT NULL"
-			}
+		def := fmt.Sprintf("%s %s", col.Name, col.Type)
+		if col.IsPrimary {
+			def += " PRIMARY KEY"
+		}
+		if !col.IsNullable {
+			def += " NOT NULL"
 		}
 		columnDefs = append(columnDefs, def)
 	}
 
+	// Create table using SQL
 	createTableSQL := fmt.Sprintf("CREATE TABLE %s (\n  %s\n);",
 		c.TableName,
 		strings.Join(columnDefs, ",\n  "),
 	)
 
-	// Create table
 	if err := c.destConn.Exec(createTableSQL).Error; err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
 	}
@@ -277,11 +256,10 @@ func (c *Copier) Copy() error {
 		return err
 	}
 
-	// Get the data from source table
+	// Get the data from source table using GORM
 	var records []map[string]interface{}
-	result := c.sourceConn.Table(c.TableName).Find(&records)
-	if result.Error != nil {
-		return fmt.Errorf("failed to read from source table: %w", result.Error)
+	if err := c.sourceConn.Table(c.TableName).Find(&records).Error; err != nil {
+		return fmt.Errorf("failed to read from source table: %w", err)
 	}
 
 	// Begin transaction in destination database
