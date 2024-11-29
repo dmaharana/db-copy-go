@@ -1,16 +1,17 @@
 # DB Copy Tool
 
-A command-line tool written in Go that helps you copy tables between different database systems. Currently supports copying from SQLite to PostgreSQL.
+A command-line tool written in Go that helps you copy tables between different database systems. Currently supports copying between SQLite and PostgreSQL, as well as PostgreSQL to PostgreSQL.
 
 ## Features
 
-- Copy tables from SQLite to PostgreSQL
-- Automatic table creation in destination database
-- Schema conversion from SQLite to PostgreSQL
+- Copy tables between different database systems:
+  - SQLite to PostgreSQL
+  - PostgreSQL to SQLite
+  - PostgreSQL to PostgreSQL
+- Automatic schema conversion
 - Batch processing for efficient data transfer
-- Create sample SQLite database with test data
-- Progress tracking during operations
-- Transaction support for data consistency
+- Automatic table creation in destination database
+- Type conversion between different database systems
 
 ## Installation
 
@@ -65,23 +66,21 @@ The sample database will contain a `sample_users` table with the following schem
 
 ### Copying Tables
 
-To copy a table from SQLite to PostgreSQL:
+To copy a table between databases:
 
 ```bash
-./dbcopy copy -s source.db -d "postgres://user:password@localhost:5432/dbname" -t table_name [-b batch_size]
+./dbcopy copy -s <source> -d <destination> -t <table_name> [-b batch_size]
 ```
 
 Required flags:
-- `-s, --source`: Source SQLite database file path
-- `-d, --dest`: Destination PostgreSQL connection string
+- `-s, --source`: Source database. Can be either:
+  - SQLite database file path (e.g., "database.db")
+  - PostgreSQL connection string (e.g., "postgres://user:password@localhost:5432/dbname")
+- `-d, --dest`: Destination database. Can be either:
+  - SQLite database file path (e.g., "output.db")
+  - PostgreSQL connection string (e.g., "postgres://user:password@localhost:5432/dbname")
 - `-t, --table`: Name of the table to copy
-
-Optional flags:
-- `-b, --batch-size`: Number of records to copy in each batch (default: 1000)
-
-Example PostgreSQL connection strings:
-- Basic: `postgres://username:password@localhost:5432/dbname`
-- With SSL mode: `postgres://username:password@localhost:5432/dbname?sslmode=disable`
+- `-b, --batch`: Batch size for copying (default: 1000)
 
 ## Example Workflow
 
@@ -90,10 +89,44 @@ Example PostgreSQL connection strings:
 ./dbcopy sample -d test.db -c 500
 ```
 
-2. Copy the sample table to PostgreSQL:
+2. Copy table between different databases:
+
+SQLite to PostgreSQL:
 ```bash
 ./dbcopy copy -s test.db -d "postgres://user:password@localhost:5432/dbname" -t "sample_users"
 ```
+
+PostgreSQL to SQLite:
+```bash
+./dbcopy copy -s "postgres://user:password@localhost:5432/dbname" -d output.db -t "sample_users"
+```
+
+PostgreSQL to PostgreSQL:
+```bash
+./dbcopy copy -s "postgres://source:password@localhost:5432/sourcedb" -d "postgres://dest:password@localhost:5432/destdb" -t "sample_users"
+```
+
+## Type Conversion
+
+The tool automatically handles type conversion between different databases:
+
+SQLite to PostgreSQL:
+- INTEGER → INTEGER
+- REAL → DOUBLE PRECISION
+- TEXT → TEXT
+- BLOB → BYTEA
+- BOOLEAN → BOOLEAN
+- DATETIME → TIMESTAMP
+- NUMERIC → NUMERIC
+
+PostgreSQL to SQLite:
+- BIGINT/INTEGER/SMALLINT → INTEGER
+- DOUBLE PRECISION/REAL/NUMERIC/DECIMAL → REAL
+- TEXT/VARCHAR/CHAR → TEXT
+- BYTEA → BLOB
+- BOOLEAN → BOOLEAN
+- TIMESTAMP → DATETIME
+- Others → TEXT
 
 ## Dependencies
 
