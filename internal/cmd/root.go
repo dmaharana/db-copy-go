@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"db-copy/internal/db"
+
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 )
 
 var (
@@ -73,4 +75,8 @@ func runCopy(cmd *cobra.Command, args []string) error {
 
 func runSample(cmd *cobra.Command, args []string) error {
 	return db.CreateSampleData(sampleDBPath, recordCount)
+}
+
+func SetLogger(logger *zap.Logger) {
+	zap.ReplaceGlobals(logger)
 }

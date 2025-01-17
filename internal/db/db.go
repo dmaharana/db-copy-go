@@ -23,14 +23,14 @@ const (
 
 // Copier handles database copy operations
 type Copier struct {
-	SourceDB      string
-	DestDB        string
-	TableName     string
-	BatchSize     int
-	sourceConn    *gorm.DB
-	destConn      *gorm.DB
-	sourceDBType  DBType
-	destDBType    DBType
+	SourceDB     string
+	DestDB       string
+	TableName    string
+	BatchSize    int
+	sourceConn   *gorm.DB
+	destConn     *gorm.DB
+	sourceDBType DBType
+	destDBType   DBType
 }
 
 // NewCopier creates a new instance of Copier
@@ -260,6 +260,12 @@ func (c *Copier) Copy() error {
 		return err
 	}
 
+	// Get the primary key column name.
+	primaryKeyColumn, err := c.getPrimaryKeyColumnName()
+	if err != nil {
+		return fmt.Errorf("failed to get primary key column name: %w", err)
+	}
+
 	// Get the data from source table using GORM
 	var records []map[string]interface{}
 	if err := c.sourceConn.Table(c.TableName).Find(&records).Error; err != nil {
@@ -274,7 +280,19 @@ func (c *Copier) Copy() error {
 		}
 	}()
 
-	// Copy data in batches
+	// Identify existing primary keys in the destination table
+	var existingPrimaryKeys []interface{}
+	if err := c.destConn.Model(&struct{}{}).Table(c.TableName).Pluck(primaryKeyColumn, &existingPrimaryKeys).Error; err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to get existing primary keys from destination table: %w", err)
+	}
+
+	existingPrimaryKeyMap := make(map[interface{}]bool)
+	for _, pk := range existingPrimaryKeys {
+		existingPrimaryKeyMap[pk] = true
+	}
+
+	// Copy data in batches, filtering out existing records
 	totalRecords := len(records)
 	for i := 0; i < totalRecords; i += c.BatchSize {
 		end := i + c.BatchSize
@@ -282,13 +300,27 @@ func (c *Copier) Copy() error {
 			end = totalRecords
 		}
 
-		batch := records[i:end]
-		if err := tx.Table(c.TableName).Create(&batch).Error; err != nil {
-			tx.Rollback()
-			return fmt.Errorf("failed to insert batch into destination table: %w", err)
+		var batch []map[string]interface{}
+		for _, record := range records[i:end] {
+			primaryKeyValue, ok := record[primaryKeyColumn]
+			if !ok {
+				// Handle cases where primary key is missing (should probably be logged)
+				continue
+			}
+			if _, exists := existingPrimaryKeyMap[primaryKeyValue]; !exists {
+				batch = append(batch, record)
+			}
 		}
 
-		fmt.Printf("Copied %d/%d records\n", end, totalRecords)
+		if len(batch) > 0 {
+			if err := tx.Table(c.TableName).Create(&batch).Error; err != nil {
+				tx.Rollback()
+				return fmt.Errorf("failed to insert batch into destination table: %w", err)
+			}
+			fmt.Printf("Copied %d records (new records only)\n", len(batch))
+		} else {
+			fmt.Println("No new records to copy in current batch")
+		}
 	}
 
 	if err := tx.Commit().Error; err != nil {
@@ -297,4 +329,36 @@ func (c *Copier) Copy() error {
 
 	fmt.Printf("Successfully copied %d records from %s to destination database\n", totalRecords, c.TableName)
 	return nil
+}
+
+// getPrimaryKeyColumnName retrieves the name of the primary key column for the given table.
+func (c *Copier) getPrimaryKeyColumnName() (string, error) {
+	var primaryKeyColumns []struct {
+		Name string
+	}
+
+	// This part is database-specific and will need adaptation depending on DB type.
+	if c.sourceDBType == DBTypeSQLite {
+		//SQLite
+		if err := c.sourceConn.Raw("PRAGMA table_info(?)", c.TableName).Scan(&primaryKeyColumns).Error; err != nil {
+			return "", fmt.Errorf("failed to get primary key information: %w", err)
+		}
+		for _, col := range primaryKeyColumns {
+			if col.Name == "ID" {
+				return col.Name, nil
+			}
+		}
+		return "", fmt.Errorf("primary key not found for table: %s", c.TableName)
+	} else if c.sourceDBType == DBTypePostgres {
+		//PostgreSQL
+		//Adapt this part appropriately for Postgres if 'ID' is not the primary key.
+		if err := c.sourceConn.Raw(`SELECT column_name FROM information_schema.columns WHERE table_name = $1 AND column_default LIKE 'nextval%'`, c.TableName).Scan(&primaryKeyColumns).Error; err != nil {
+			return "", fmt.Errorf("failed to get primary key information: %w", err)
+		}
+		if len(primaryKeyColumns) > 0 {
+			return primaryKeyColumns[0].Name, nil
+		}
+		return "", fmt.Errorf("primary key not found for table: %s", c.TableName)
+	}
+	return "", fmt.Errorf("Unsupported database type")
 }
